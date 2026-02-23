@@ -1,159 +1,110 @@
-terraform {
-  required_providers {
-    aws = {
-      source  = "hashicorp/aws"
-      version = "~> 6.0"
-    }
+resource "aws_iam_role" "cluster-role" {
+  name = "eks-cluster-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com"
+        }
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSClusterPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.cluster-role.name
+}
+
+resource "aws_eks_cluster" "eks" {
+  name = "my-eks"
+
+  access_config {
+    authentication_mode = "API"
   }
-}
-provider "aws" {
-    region = "eu-north-1"
-}
 
-#VPC
-resource "aws_vpc" "myvpc" {
-    cidr_block = "10.0.0.0/16"
+  role_arn = aws_iam_role.cluster-role.arn
+  version  = "1.31"
 
-    tags = {
-      Name = "my-VPC"
-    }
-  
-}
-# subnet
-resource "aws_subnet" "public-cub" {
-    vpc_id = aws_vpc.myvpc.id
-    cidr_block = "10.0.1.0/24"
-    map_public_ip_on_launch = true
-    availability_zone = "eu-north-1a"
-
-    tags = {
-      Name = "public-sub"
-    }
-  
-}
-
-resource "aws_subnet" "private-sub" {
-    vpc_id = aws_vpc.myvpc.id
-    cidr_block = "10.0.2.0/24"
-    availability_zone = "eu-north-1a"
-    map_public_ip_on_launch = false
-
-
-    tags = {
-      Name = "private-sub"
-    }
-}
-
-# IGW 
-
-resource "aws_internet_gateway" "myigw" {
-    vpc_id = aws_vpc.myvpc.id
-
-    tags = {
-      Name = "my-igw"
-    }
-}
-/*
-resource "aws_internet_gateway_attachment" "attach" {
-    internet_gateway_id = aws_internet_gateway.myigw.id
-    vpc_id = aws_vpc.myvpc.id
-  
-}*/
-
-# Route Table
-
-resource "aws_route_table" "public-route" {
-    vpc_id = aws_vpc.myvpc.id
-    route{
-        cidr_block = "0.0.0.0/0"
-        gateway_id = aws_internet_gateway.myigw.id
-    }
-  tags = {
-    Name = "public-route"
+  vpc_config {
+    subnet_ids = [ "subnet-079f62399e9d6a074","subnet-0fa9b9ed12a6dca5f","subnet-085e69c4f048fd477"]
   }
+
+  # Ensure that IAM Role permissions are created before and deleted
+  # after EKS Cluster handling. Otherwise, EKS will not be able to
+  # properly delete EKS managed EC2 infrastructure such as Security Groups.
+  depends_on = [
+    aws_iam_role_policy_attachment.cluster_AmazonEKSClusterPolicy,
+  ]
 }
 
-resource "aws_route_table_association" "a" {
-    subnet_id = aws_subnet.public-cub.id
-    route_table_id = aws_route_table.public-route.id
-  
+######
+
+resource "aws_iam_role" "node-role" {
+  name = "eks-node-role" #eks-node-group-example
+
+  assume_role_policy = jsonencode({
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+    }]
+    Version = "2012-10-17"
+  })
 }
 
-# Security Group
+resource "aws_iam_role_policy_attachment" "example-AmazonEKSWorkerNodePolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.node-role.name
+}
 
-resource "aws_security_group" "vpc-sg" {
-    name = "vpc-sg"
-    vpc_id =  aws_vpc.myvpc.id
+resource "aws_iam_role_policy_attachment" "example-AmazonEKSWorkerNodeMinimalPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy"
+  role       = aws_iam_role.node-role.name
+}
+
+resource "aws_iam_role_policy_attachment" "example-AmazonEKS_CNI_Policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.node-role.name
+}
+
+resource "aws_iam_role_policy_attachment" "example-AmazonEC2ContainerRegistryReadOnly" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.node-role.name
+}
+
+resource "aws_eks_node_group" "node-group" {
+  cluster_name    = aws_eks_cluster.eks.name
+  node_group_name = "node1"
+  node_role_arn   = aws_iam_role.node-role.arn
+  subnet_ids      = [ "subnet-079f62399e9d6a074","subnet-0fa9b9ed12a6dca5f","subnet-085e69c4f048fd477"]
+
+  scaling_config {
+    desired_size = 1
+    max_size     = 2
+    min_size     = 1
+  }
+
+  update_config {
+    max_unavailable = 1
+  }
+  instance_types = ["c7i-flex.large"]
+
+  # Ensure that IAM Role permissions are created before and deleted after EKS Node Group handling.
+  # Otherwise, EKS will not be able to properly delete EC2 Instances and Elastic Network Interfaces.
+  depends_on = [
+    aws_iam_role_policy_attachment.example-AmazonEKSWorkerNodePolicy,
+    aws_iam_role_policy_attachment.example-AmazonEKS_CNI_Policy,
+    aws_iam_role_policy_attachment.example-AmazonEC2ContainerRegistryReadOnly,
+    aws_iam_role_policy_attachment.example-AmazonEKSWorkerNodeMinimalPolicy,
     
-
-    ingress {
-        from_port = 22
-        to_port = 22
-        protocol = "tcp"
-        cidr_blocks = [ "0.0.0.0/0" ]
-    }
-    ingress {
-        from_port = 80
-        to_port = 80
-        protocol = "tcp"
-        cidr_blocks = [ "0.0.0.0/0" ]
-    }
-    egress {
-        from_port = 0
-        to_port = 0
-        protocol = "-1"
-        cidr_blocks = [ "0.0.0.0/0" ]
-    }
-}
-
-# NIC
-
-resource "aws_network_interface" "inter" {
-    subnet_id = aws_subnet.public-cub.id
-    private_ips = [ "10.0.1.100" ]
-
-    tags = {
-      Name = "public-NIC"
-    }
-  
-}
-
-# EC2
-
-resource "aws_instance" "myec2" {
-    ami = "ami-073130f74f5ffb161"
-    instance_type = "t3.micro"
-    key_name = "demo"
-    subnet_id = aws_subnet.public-cub.id
-    vpc_security_group_ids = [ aws_security_group.vpc-sg.id ]
-    /*network_interface{
-        network_interface_id = aws_network_interface.inter.id
-        device_index = 0
-    }*/
-    tags ={
-        Name = "vpc-ec2"
-    }
-    user_data = base64encode(<<-EOF
-        #!/bin/bash
-        apt update -y
-        apt install -y nginx
-        systemctl enable nginx
-        systemctl start nginx
-    EOF
-    )
-}
-
-output "vpc" {
-    value = aws_vpc.myvpc.tags
-  
-}
-output "public-ip" {
-    value = aws_instance.myec2.public_ip
-}
-output "subnet" {
-    value = aws_subnet.public-cub.tags  
-}
-output "ec2" {
-    value = aws_instance.myec2.private_ip
-  
+  ]
 }
